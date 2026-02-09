@@ -123,3 +123,17 @@ The project is provided **“as is”**, without warranties of any kind.
 ---
 
 ## Feedback
+
+If you encounter a bug, unexpected behavior, or have a focused suggestion related to Alpha1:
+
+Please use the standard GitHub workflow to report it.
+
+1. Go to the **Issues** tab of this repository
+2. Click **New Issue**
+3. Provide a clear and detailed description, including:
+   - What you were doing
+   - What you expected to happen
+   - What actually happened
+   - Any relevant context (mode, project state, steps to reproduce)
+
+Well-described issues help improve the device and guide future development.
