@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Alpha Sequencer Web Tool</title>
+
+<style>
+body {
+    font-family: Arial, sans-serif;
+    background: #f5f5f5;
+    color: #222;
+    padding: 30px;
+}
+h1 { margin-bottom: 10px; }
+button {
+    padding: 8px 14px;
+    margin: 4px;
+    border-radius: 6px;
+    border: 1px solid #bbb;
+    background: white;
+    cursor: pointer;
+}
+button:hover { background: #eaeaea; }
+.section {
+    margin-top: 30px;
+    padding-top: 15px;
+    border-top: 1px solid #ccc;
+}
+#log {
+    margin-top: 20px;
+    padding: 10px;
+    background: white;
+    border: 1px solid #ccc;
+    height: 200px;
+    overflow-y: auto;
+    font-size: 13px;
+}
+</style>
+</head>
+
+<body>
+
+<h1>Alpha Sequencer Web Tool</h1>
+
+<button onclick="connect()">Connect</button>
+<button onclick="disconnect()">Disconnect</button>
+
+<div class="section">
+<h2>Export BIN</h2>
+<div id="binButtons"></div>
+<button onclick="exportAllBin()">Export ALL BIN</button>
+</div>
+
+<div class="section">
+<h2>Export MIDI</h2>
+<div id="midiButtons"></div>
+<button onclick="exportAllMidi()">Export ALL MIDI</button>
+</div>
+<div class="section">
+<h2>Import BIN</h2>
+<div id="importBinButtons"></div>
+<input type="file" id="binFileInput" style="display:none" accept=".bin">
+<button onclick="importAllBin()">Import ALL BIN</button>
+</div>
+
+<div class="section">
+<h2>Import MIDI</h2>
+<div id="importMidiButtons"></div>
+<input type="file" id="midiFileInput" style="display:none" accept=".mid">
+<button onclick="importAllMidi()">Import ALL MIDI</button>
+</div>
+<div id="log"></div>
+
+<script>
+
+let port;
+let reader;
+let writer;
+let textDecoder = new TextDecoder();
+let textEncoder = new TextEncoder();
+let pendingBinProject = null;
+let pendingMidiProject = null;
+function log(msg) {
+    document.getElementById("log").innerHTML += msg + "<br>";
+    document.getElementById("log").scrollTop = 999999;
+}
+
+async function connect() {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    writer = port.writable.getWriter();
+    reader = port.readable.getReader();
+    log("Connected");
+}
+
+async function disconnect() {
+    if (reader) await reader.cancel();
+    if (writer) writer.releaseLock();
+    if (port) await port.close();
+    log("Disconnected");
+}
+
+async function send(cmd) {
+    await writer.write(textEncoder.encode(cmd + "\n"));
+}
+
+async function readDump() {
+
+    let buffer = "";
+    let started = false;
+
+    while (true) {
+
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        const chunk = textDecoder.decode(value);
+        buffer += chunk;
+
+        if (!started && buffer.includes("BEGIN")) {
+            started = true;
+        }
+
+        if (started && buffer.includes("END")) {
+            break;
+        }
+    }
+
+    return buffer;
+}
+
+function cleanHex(raw) {
+
+    const lines = raw.split(/\r?\n/);
+
+    let collecting = false;
+    let hex = "";
+
+    for (let line of lines) {
+
+        line = line.trim();
+
+        if (line.startsWith("BEGIN")) {
+            collecting = true;
+            continue;
+        }
+
+        if (line.startsWith("END")) {
+            break;
+        }
+
+        if (collecting) {
+            hex += line;
+        }
+    }
+
+    hex = hex.replace(/[^0-9A-Fa-f]/g, "");
+
+    return hex;
+}
+
+function hexToBytes(hex) {
+    let bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < bytes.length; i++) {
+        bytes[i] = parseInt(hex.substr(i*2,2),16);
+    }
+    return bytes;
+}
+async function uploadBinToDevice(project, bytes) {
+
+    if (bytes.length !== 4096) {
+        log("Invalid BIN size (must be 4096 bytes)");
+        return;
+    }
+
+    log("Uploading project " + project);
+
+    await send("UPLOAD " + project);
+
+    const { value } = await reader.read();
+    const response = textDecoder.decode(value);
+
+    if (!response.includes("READY")) {
+        log("Device not ready");
+        return;
+    }
+
+    let hex = "";
+    for (let b of bytes) {
+        hex += b.toString(16).padStart(2,"0").toUpperCase();
+    }
+    log("Writing " + bytes.length + " bytes..."); //Добавил лог если сломало то это я виноват
+    await writer.write(textEncoder.encode(hex));
+
+let finalResponse = "";
+const startTime = Date.now();
+
+while (true) {
+
+    // ⬇️ TIMEOUT PROTECTION (15 sec)
+    if (Date.now() - startTime > 15000) {
+        log("❌ Upload timeout");
+        break;
+    }
+
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    const chunk = textDecoder.decode(value).trim();
+    if (!chunk) continue;
+
+    log("Device: " + chunk);
+
+    finalResponse += chunk;
+
+    if (
+        finalResponse.includes("OK") ||
+        finalResponse.includes("DONE") ||
+        finalResponse.includes("ERROR")
+    ) {
+        break;
+    }
+}
+
+if (finalResponse.includes("OK") || finalResponse.includes("DONE")) {
+    log("✅ Upload complete (project " + project + ")");
+}
+else if (finalResponse.includes("ERROR")) {
+    log("❌ Upload failed");
+
+}
+}
+function download(filename, data) {
+    const blob = new Blob([data]);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+}
+
+async function exportBin(project) {
+    log("Requesting project " + project);
+    await send("DUMP " + project);
+    const raw = await readDump();
+    const hex = cleanHex(raw);
+    const bytes = hexToBytes(hex);
+    download("project_" + project + ".bin", bytes);
+    log("BIN saved: project_" + project);
+}
+
+async function exportAllBin() {
+    for (let i=1;i<=10;i++) {
+        await exportBin(i);
+    }
+}
+function buildBinFromMidi(midiBytes) {
+
+    const dv = new DataView(midiBytes.buffer);
+
+    if (dv.getUint32(0,false) !== 0x4D546864) {
+        log("Not a MIDI file");
+        return null;
+    }
+
+    const tracks = dv.getUint16(10,false);
+    const ppq    = dv.getUint16(12,false);   
+    
+    log("PPQ: " + ppq);     
+                    
+    let offset = 14;
+    let eventsPerTrack = [];
+    let detectedBpm = 120;   // ← по умолчанию
+
+    for (let t=0; t<tracks; t++) {
+
+        if (dv.getUint32(offset,false) !== 0x4D54726B) {
+            log("Invalid track chunk");
+            return null;
+        }
+
+        const length = dv.getUint32(offset+4,false);
+        offset += 8;
+        const end = offset + length;
+
+        let tick = 0;
+        let events = [];
+        let runningStatus = null;
+
+        while (offset < end) {
+
+            let delta = 0;
+            let byte;
+
+            do {
+                byte = midiBytes[offset++];
+                delta = (delta << 7) | (byte & 0x7F);
+            } while (byte & 0x80);
+
+            tick += delta;
+
+// ===== PPQ scaling to 96 =====
+let scaledTick = tick;
+
+if (ppq && ppq !== 96) {
+    scaledTick = Math.round(tick * 96 / ppq);
+}
+
+            let status = midiBytes[offset++];
+
+if (status < 0x80) {
+    // running status
+    offset--;
+    status = runningStatus;
+} else {
+    runningStatus = status;
+}
+
+if (status === 0xFF) {
+
+    const type = midiBytes[offset++];
+    const len  = midiBytes[offset++];
+
+    // ===== TEMPO META EVENT =====
+    if (type === 0x51 && len === 3) {
+
+        const mpq =
+            (midiBytes[offset] << 16) |
+            (midiBytes[offset+1] << 8) |
+            midiBytes[offset+2];
+
+        detectedBpm = Math.round(60000000 / mpq);
+
+        log("Detected BPM: " + detectedBpm);
+    }
+
+    offset += len;
+    continue;
+}
+
+            const type = status & 0xF0;
+            const ch   = status & 0x0F;
+
+            const note = midiBytes[offset++];
+            const vel  = midiBytes[offset++];
+
+            if (type === 0x90 && vel > 0) {
+                events.push({tick:scaledTick,type:1,note,vel,ch});
+            } else {
+                events.push({tick:scaledTick,type:0,note,vel:0,ch});
+            }
+        }
+
+        eventsPerTrack.push(events);
+        offset = end;
+    }
+
+    let buffer = new Uint8Array(4096);
+    let view   = new DataView(buffer.buffer);
+
+view.setUint32(0,0x4D534551,true);  // magic
+view.setUint16(4,2,true);          // version
+view.setUint16(6,16,true);         // tracks
+
+view.setUint8(8,0);                // seqMode
+view.setUint8(9,0);                // loopEnabled
+
+view.setUint16(10,0,true);         // padding (ВАЖНО!)
+
+view.setUint32(12,16,true);        // loopLengthBeats
+    if (!detectedBpm || detectedBpm < 30 || detectedBpm > 300) {
+    detectedBpm = 120;
+}
+
+view.setUint16(16, detectedBpm, true);  // bpm
+view.setUint8(18,0);                   // lastProject
+view.setUint8(19,0);                   // padding
+
+    let ptr = 20;
+    buffer[ptr++] = 0;
+
+    for (let t=0;t<16;t++) {
+
+        let events = eventsPerTrack[t] || [];
+
+        view.setUint16(ptr, events.length, true);
+        ptr += 2;
+
+        for (let e of events) {
+
+            view.setUint32(ptr, e.tick, true);
+            buffer[ptr+4] = e.type;
+            buffer[ptr+5] = e.note;
+            buffer[ptr+6] = e.vel;
+            buffer[ptr+7] = e.ch;
+
+            ptr += 8;
+        }
+    }
+
+    return buffer;
+}
+function buildMidiFromBin(bytes) {
+
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+    const magic = dv.getUint32(0, true);
+    if (magic !== 0x4D534551) {
+        log("Invalid magic");
+        return null;
+    }
+
+    const tracks = dv.getUint16(6, true);
+let bpm = dv.getUint16(16, true);  // ← правильный offset
+if (!bpm || bpm < 30 || bpm > 300) bpm = 120;
+
+    const headerSize = 20;
+    let ptr = headerSize;
+
+    const currentTrack = bytes[ptr];
+    ptr += 1;
+
+    const EVENT_SIZE = 8;
+    const PPQ = 96;
+
+    let trackEvents = [];
+
+    for (let t=0; t<tracks; t++) {
+
+        if (ptr + 2 > bytes.length) break;
+
+        let count = dv.getUint16(ptr, true);
+        ptr += 2;
+
+        let events = [];
+
+        for (let i=0; i<count; i++) {
+
+            if (ptr + EVENT_SIZE > bytes.length) break;
+
+            let tick = dv.getUint32(ptr, true);
+            let type = bytes[ptr + 4];
+            let note = bytes[ptr + 5];
+            let vel  = bytes[ptr + 6];
+            let ch   = bytes[ptr + 7];
+
+            ptr += EVENT_SIZE;
+
+            events.push({tick,type,note,vel,ch});
+        }
+
+        events.sort((a,b)=>a.tick-b.tick);
+        trackEvents.push(events);
+    }
+
+    function writeVarLen(buffer, value) {
+        let tmp = value & 0x7F;
+        while ((value >>= 7)) {
+            tmp <<= 8;
+            tmp |= ((value & 0x7F) | 0x80);
+        }
+        while (true) {
+            buffer.push(tmp & 0xFF);
+            if (tmp & 0x80) tmp >>= 8;
+            else break;
+        }
+    }
+
+function buildTrackChunk(events, trackIndex) {
+
+    let data = [];
+    let lastTick = 0;
+
+    // ===== Track Name Meta Event =====
+    const nameStr = "Track " + (trackIndex + 1);
+    const nameBytes = new TextEncoder().encode(nameStr);
+
+    data.push(0x00);          // delta time = 0
+    data.push(0xFF, 0x03);    // Meta: Track Name
+    data.push(nameBytes.length);
+    data.push(...nameBytes);
+
+    // ===== Note Events =====
+    for (let e of events) {
+
+        let delta = e.tick - lastTick;
+        lastTick = e.tick;
+
+        writeVarLen(data, delta);
+
+        if (e.type == 1) {
+            data.push(0x90 | (e.ch & 0x0F));
+            data.push(e.note);
+            data.push(e.vel);
+        } else {
+            data.push(0x80 | (e.ch & 0x0F));
+            data.push(e.note);
+            data.push(0);
+        }
+    }
+
+    // End of track
+    data.push(0x00, 0xFF, 0x2F, 0x00);
+
+    return data;
+}
+
+    // ========= Tempo Track =========
+
+    let tempoTrack = [];
+    const microPerQuarter = Math.round(60000000 / bpm);
+
+    tempoTrack.push(0x00);
+    tempoTrack.push(0xFF, 0x51, 0x03,
+        (microPerQuarter >> 16) & 0xFF,
+        (microPerQuarter >> 8) & 0xFF,
+        microPerQuarter & 0xFF
+    );
+    // ===== Loop Start Marker =====
+const markerStr = "Loop Start";
+const markerBytes = new TextEncoder().encode(markerStr);
+
+tempoTrack.push(0x00);          // delta time = 0
+tempoTrack.push(0xFF, 0x06);    // Meta: Marker
+tempoTrack.push(markerBytes.length);
+tempoTrack.push(...markerBytes);
+
+// End of tempo track
+tempoTrack.push(0x00, 0xFF, 0x2F, 0x00);
+
+    // ========= MIDI File =========
+
+    let midi = [];
+
+    midi.push(
+        0x4D,0x54,0x68,0x64,
+        0x00,0x00,0x00,0x06,
+        0x00,0x01, // format 1
+        ((tracks+1)>>8)&0xFF, (tracks+1)&0xFF,
+        (PPQ>>8)&0xFF, PPQ&0xFF
+    );
+
+    function appendTrack(data) {
+        midi.push(0x4D,0x54,0x72,0x6B);
+        let size = data.length;
+        midi.push(
+            (size>>24)&0xFF,
+            (size>>16)&0xFF,
+            (size>>8)&0xFF,
+            size&0xFF
+        );
+        midi.push(...data);
+    }
+
+    appendTrack(tempoTrack);
+
+    for (let t=0; t<tracks; t++) {
+    appendTrack(buildTrackChunk(trackEvents[t], t));
+}
+
+    return new Uint8Array(midi);
+}
+
+async function exportMidi(project) {
+    log("Requesting project " + project);
+    await send("DUMP " + project);
+    const raw = await readDump();
+    const hex = cleanHex(raw);
+    log("Hex length: " + hex.length);
+
+if (hex.length % 2 !== 0) {
+    log("HEX LENGTH IS ODD!");
+}
+    log("First 8 hex chars: " + hex.substring(0,8));
+    const bytes = hexToBytes(hex);
+
+    const midi = buildMidiFromBin(bytes);
+    if (!midi) return;
+
+    download("project_" + project + ".mid", midi);
+    log("MIDI saved: project_" + project);
+}
+
+async function exportAllMidi() {
+    for (let i=1;i<=10;i++) {
+        await exportMidi(i);
+    }
+}
+
+function buildButtons() {
+    let binDiv = document.getElementById("binButtons");
+    let midiDiv = document.getElementById("midiButtons");
+
+    for (let i=1;i<=10;i++) {
+        let b = document.createElement("button");
+        b.innerText="Export BIN " + i;
+        b.onclick=()=>exportBin(i);
+        binDiv.appendChild(b);
+
+        let m = document.createElement("button");
+        m.innerText="Export MIDI " + i;
+        m.onclick=()=>exportMidi(i);
+        midiDiv.appendChild(m);
+    }
+}
+
+buildButtons();
+function buildImportButtons() {
+
+    let binDiv = document.getElementById("importBinButtons");
+    let midiDiv = document.getElementById("importMidiButtons");
+
+    for (let i=1;i<=10;i++) {
+
+        let b = document.createElement("button");
+        b.innerText="Import BIN " + i;
+        b.onclick=()=>selectBinFile(i);
+        binDiv.appendChild(b);
+
+        let m = document.createElement("button");
+        m.innerText="Import MIDI " + i;
+        m.onclick=()=>selectMidiFile(i);
+        midiDiv.appendChild(m);
+    }
+}
+
+buildImportButtons();
+
+function selectBinFile(project) {
+    pendingBinProject = project;
+    document.getElementById("binFileInput").click();
+}
+
+document.getElementById("binFileInput").addEventListener("change", async function(e) {
+
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const arrayBuffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+
+    await uploadBinToDevice(pendingBinProject, bytes);
+e.target.value = "";
+});
+function selectMidiFile(project) {
+    pendingMidiProject = project;
+    document.getElementById("midiFileInput").click();
+}
+
+document.getElementById("midiFileInput").addEventListener("change", async function(e) {
+
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const arrayBuffer = await file.arrayBuffer();
+    const midiBytes = new Uint8Array(arrayBuffer);
+
+    const binBytes = buildBinFromMidi(midiBytes);
+
+    if (!binBytes) {
+        log("Invalid MIDI");
+        return;
+    }
+
+    await uploadBinToDevice(pendingMidiProject, binBytes);
+e.target.value = "";
+});
+// =====================
+// IMPORT ALL (stub, чтобы не падало)
+// =====================
+
+async function importAllBin() {
+    log("Bulk BIN import not supported automatically. Use per-project import.");
+}
+
+async function importAllMidi() {
+    log("Bulk MIDI import not supported automatically. Use per-project import.");
+}
+
+</script>
+</body>
+</html>
