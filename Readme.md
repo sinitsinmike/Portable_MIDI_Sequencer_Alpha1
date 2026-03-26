@@ -1,3 +1,6 @@
+<img width="985" height="438" alt="Portable_MIDI_Sequencer_Schematics" src="https://github.com/user-attachments/assets/b6c4f1e8-5b15-4b8b-938c-43f01f47feee" />
+
+
 # Alpha1 — Portable Hardware MIDI Sequencer (Public Alpha)
 
 Alpha1 is a compact, performance-oriented hardware MIDI sequencer
