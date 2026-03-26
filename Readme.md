@@ -137,3 +137,9 @@ Please use the standard GitHub workflow to report it.
    - Any relevant context (mode, project state, steps to reproduce)
 
 Well-described issues help improve the device and guide future development.
+
+---
+
+## Web Tool
+
+https://sinitsinmike.github.io/Alpha1_Web_MIDI2/
